@@ -141,6 +141,7 @@ public class HttpDataSource implements DataSource {
   private HttpURLConnection connection;
   private InputStream inputStream;
   private boolean opened;
+  private long skipBytes;
 
   private long dataLength;
   private long bytesRead;
@@ -272,6 +273,18 @@ public class HttpDataSource implements DataSource {
     }
 
     long contentLength = getContentLength(connection);
+
+    if (responseCode == 200 && dataSpec.position != 0) {
+      // We requested a range, but server did not comply.
+      skipBytes = dataSpec.position;
+      Log.i(TAG, "Server does not support partial requests");
+
+      if (dataSpec.length != C.LENGTH_UNBOUNDED) {
+        // Avoid UnexpectedLengthException
+        contentLength = dataSpec.length;
+      }
+    }
+
     dataLength = dataSpec.length == C.LENGTH_UNBOUNDED ? contentLength : dataSpec.length;
 
     if (dataSpec.length != C.LENGTH_UNBOUNDED && contentLength != C.LENGTH_UNBOUNDED
@@ -301,16 +314,24 @@ public class HttpDataSource implements DataSource {
   @Override
   public int read(byte[] buffer, int offset, int readLength) throws HttpDataSourceException {
     int read = 0;
+    int skipped = 0;
+
     try {
+      while (skipBytes > 0) {
+        long currentSkip = inputStream.skip(skipBytes);
+        skipBytes -= currentSkip;
+        skipped += currentSkip;
+      }
+
       read = inputStream.read(buffer, offset, readLength);
     } catch (IOException e) {
       throw new HttpDataSourceException(e, dataSpec);
     }
 
-    if (read > 0) {
-      bytesRead += read;
+    if (read + skipped > 0) {
+      bytesRead += read;  // only take the requested bytes, not the skipped
       if (listener != null) {
-        listener.onBytesTransferred(read);
+        listener.onBytesTransferred(read + skipped);
       }
     } else if (dataLength != C.LENGTH_UNBOUNDED && dataLength != bytesRead) {
       // Check for cases where the server closed the connection having not sent the correct amount
